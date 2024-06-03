@@ -17,7 +17,6 @@ This project is part of the FIN 550: Big Data course and focuses on property ass
 The project utilizes three key datasets:
 - `predict_property_data.csv`: Contains 10,000 properties to be assessed.
 - `historic_property_data.csv`: Includes information on 50,000 recently sold properties.
-- `codebook.csv`: Details the variables used in the analysis.
 
 The primary objective is to predict property values in `predict_property_data.csv` using historical data and various predictive modeling techniques. The datasets are sourced from the [CCAO Res AVM GitLab repository](https://gitlab.com/ccao-data-science---modeling/models/ccao_res_avm).
 
