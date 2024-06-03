@@ -1,0 +1,489 @@
+---
+title: "Fin 550 Final Project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(writexl)
+library(readr)
+library(glmnet)
+```
+
+```{r}
+historic_property_data <- read_csv("historic_property_data.csv")
+
+predict_property_data <- read_csv("predict_property_data.csv")
+historic_property_data$meta_town_code <- as.character(historic_property_data$meta_town_code)
+predict_property_data$meta_town_code <- as.character(predict_property_data$meta_town_code)
+
+```
+
+```{r}
+# historic property data
+# Non-predictor variables to be removed
+# non_predictor_vars <- c('char_cnst_qlty', 'char_ot_impr', 'char_renovation', 
+#                         'char_repair_cnd', 'char_site', 'geo_asian_perc',
+#                         'geo_black_perc', 'geo_fips', 'geo_his_perc',
+#                         'geo_municipality', 'geo_other_perc', 'geo_property_city',
+#                         'geo_property_zip', 'geo_tract_pop', 'geo_white_perc',
+#                         'ind_large_home', 'meta_cdu', 'meta_certified_est_bldg',
+#                         'meta_certified_est_land', 'meta_class', 'meta_deed_type','meta_nbhd')
+
+non_predictor_vars <- c('char_cnst_qlty', 'char_ot_impr', 'char_renovation',
+'char_repair_cnd', 'char_site', 'geo_fips',
+'geo_municipality', 'geo_property_city',
+'geo_property_zip', 'geo_tract_pop',
+'ind_large_home', 'meta_cdu', 'meta_class', 'meta_deed_type','meta_nbhd')
+
+# Remove the non-predictor columns from the historic_property_data
+historic_property_data_clean <- historic_property_data %>%
+  select(-all_of(non_predictor_vars))
+
+# View the cleaned dataframe
+head(historic_property_data_clean)
+
+# export cleaned data to xlsx
+#write_xlsx(historic_property_data_clean, "historic_property_data_clean.xlsx")
+
+
+```
+
+```{r}
+
+# Remove the non-predictor columns from the predict_property_data
+predict_property_data_clean <- predict_property_data %>%
+  select(-all_of(non_predictor_vars))
+
+# View the cleaned dataframe
+head(predict_property_data_clean)
+
+#write_xlsx(predict_property_data_clean, "predict_property_data_clean.xlsx")
+```
+```{r}
+# Removing Columns with more than 50% missing values
+# Specify the columns to remove
+columns_to_remove <- c("char_apts", "char_tp_dsgn", "char_attic_fnsh", "char_porch")
+
+# Remove the columns from historic_property_data_clean
+historic_property_data_clean <- historic_property_data_clean[ , !(names(historic_property_data_clean) %in% columns_to_remove)]
+
+
+# Remove the same columns from predict_property_data_clean
+predict_property_data_clean <- predict_property_data_clean[ , !(names(predict_property_data_clean) %in% columns_to_remove)]
+
+
+```
+
+
+
+```{r}
+# Function to calculate mode
+get_mode <- function(v) {
+  uniqv <- unique(na.omit(v))
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# Define numerical and categorical columns
+numerical_columns <- c("char_hd_sf", "char_age", "char_bldg_sf", "econ_tax_rate", "econ_midincome")
+numerical_columns_historic <- c(numerical_columns, "sale_price")
+categorical_columns <- setdiff(names(historic_property_data_clean), numerical_columns_historic)
+
+# Replace missing values in categorical columns with mode
+historic_property_data_clean[categorical_columns] <- lapply(historic_property_data_clean[categorical_columns], function(x) ifelse(is.na(x), get_mode(x), x))
+predict_property_data_clean[categorical_columns] <- lapply(predict_property_data_clean[categorical_columns], function(x) ifelse(is.na(x), get_mode(x), x))
+
+# Replace missing values in numerical columns with mean
+historic_property_data_clean[numerical_columns_historic] <- lapply(historic_property_data_clean[numerical_columns_historic], function(x) ifelse(is.na(x), mean(x, na.rm = TRUE), x))
+predict_property_data_clean[numerical_columns] <- lapply(predict_property_data_clean[numerical_columns], function(x) ifelse(is.na(x), mean(x, na.rm = TRUE), x))
+
+# Check if all missing values are filled
+sum(is.na(historic_property_data_clean))
+sum(is.na(predict_property_data_clean))
+
+str(historic_property_data_clean)
+
+```
+```{r}
+## Winsorize Variables and Remopve Negative Values
+# Function to cap and floor values based on quantiles
+cap_floor_values <- function(data, column) {
+  lower_bound <- quantile(data[[column]], 0.01, na.rm = TRUE)
+  upper_bound <- quantile(data[[column]], 0.99, na.rm = TRUE)
+  
+  data[[column]] <- ifelse(data[[column]] < lower_bound, lower_bound, data[[column]])
+  data[[column]] <- ifelse(data[[column]] > upper_bound, upper_bound, data[[column]])
+  
+  return(data)
+}
+
+# Apply capping and flooring for each numerical column in historic_property_data_clean
+for (col in numerical_columns_historic) {
+  historic_property_data_clean <- cap_floor_values(historic_property_data_clean, col)
+}
+
+# Apply capping and flooring for each numerical column in predict_property_data_clean
+for (col in numerical_columns) {
+  predict_property_data_clean <- cap_floor_values(predict_property_data_clean, col)
+}
+
+# Ensuring that predicted_price (if exists in your datasets) is non-negative
+# Assuming 'predicted_price' is a column you plan to create or have in your data
+# Uncomment and adjust the following line if applicable
+historic_property_data_clean <- historic_property_data_clean[historic_property_data_clean$sale_price >= 0, ]
+# predict_property_data_clean <- predict_property_data_clean[predict_property_data_clean$predicted_price >= 0, ]
+
+```
+
+```{r}
+unique_values_count <- sapply(historic_property_data_clean, function(x) length(unique(x)))
+unique_values_count
+# Merge columns related to location
+#historic_property_data_clean <- historic_property_data_clean %>%
+  #mutate(location_combined = paste(meta_town_code, meta_nbhd, sep = "_")) %>%
+  #select(-meta_town_code, -meta_nbhd) # Remove the original columns after merging
+
+# Merge columns related to basement characteristics
+historic_property_data_clean <- historic_property_data_clean %>%
+  mutate(basement_combined = paste(char_bsmt, char_bsmt_fin, sep = "_")) %>%
+  select(-char_bsmt, -char_bsmt_fin) # Remove the original columns after merging
+
+# Merge columns related to heating and cooling systems
+historic_property_data_clean <- historic_property_data_clean %>%
+  mutate(climate_control = paste(char_heat, char_oheat, char_air, sep = "_")) %>%
+  select(-char_heat, -char_oheat, -char_air) # Remove the original columns after merging
+
+# Merge columns related to garage
+#historic_property_data_clean <- historic_property_data_clean %>%
+  #mutate(garage_combined = paste(char_gar1_size, char_gar1_cnst, char_gar1_att, char_gar1_area, sep = "_")) %>%
+  #select(-char_gar1_size, -char_gar1_cnst, -char_gar1_att, -char_gar1_area) # Remove the original columns after merging
+
+# Merge columns related to geographical risk factors
+#historic_property_data_clean <- historic_property_data_clean %>%
+  #mutate(geographical_risk = paste(geo_ohare_noise, geo_floodplain, geo_fs_flood_factor, geo_fs_flood_risk_direction, sep = "_")) %>%
+  #select(-geo_ohare_noise, -geo_floodplain, -geo_fs_flood_factor, -geo_fs_flood_risk_direction) # Remove the original columns after merging
+
+# The resulting dataframe
+print(historic_property_data_clean)
+```
+
+
+```{r}
+
+# Merging Columns in Predicted Dataset
+# Merge columns related to location
+#predict_property_data_clean <- predict_property_data_clean %>%
+  #mutate(location_combined = paste(meta_town_code, meta_nbhd, sep = "_")) %>%
+  #select(-meta_town_code, -meta_nbhd) # Remove the original columns after merging
+
+# Merge columns related to basement characteristics
+predict_property_data_clean <- predict_property_data_clean %>%
+  mutate(basement_combined = paste(char_bsmt, char_bsmt_fin, sep = "_")) %>%
+  select(-char_bsmt, -char_bsmt_fin) # Remove the original columns after merging
+
+# Merge columns related to heating and cooling systems
+predict_property_data_clean <- predict_property_data_clean %>%
+  mutate(climate_control = paste(char_heat, char_oheat, char_air, sep = "_")) %>%
+  select(-char_heat, -char_oheat, -char_air) # Remove the original columns after merging
+
+# Merge columns related to garage
+#predict_property_data_clean <- predict_property_data_clean %>%
+  #mutate(garage_combined = paste(char_gar1_size, char_gar1_cnst, char_gar1_att, char_gar1_area, sep = "_")) %>%
+  #select(-char_gar1_size, -char_gar1_cnst, -char_gar1_att, -char_gar1_area) # Remove the original columns after merging
+
+# Merge columns related to geographical risk factors
+#predict_property_data_clean <- predict_property_data_clean %>%
+  #mutate(geographical_risk = paste(geo_ohare_noise, geo_floodplain, geo_fs_flood_factor, geo_fs_flood_risk_direction, sep = "_")) %>%
+  #select(-geo_ohare_noise, -geo_floodplain, -geo_fs_flood_factor, -geo_fs_flood_risk_direction) # Remove the original columns after merging
+
+# The resulting dataframe
+print(predict_property_data_clean)
+```
+
+```{r}
+str(historic_property_data_clean)
+unique_values_count <- sapply(historic_property_data_clean, function(x) length(unique(x)))
+unique_values_count
+```
+
+```{r}
+# Check the correlation among variables and prevent the problem of multicollinearity for historic_property_data_clean dataset
+
+colnames(historic_property_data_clean)
+
+str(historic_property_data_clean)
+
+#historic_property_data_clean1 <- historic_property_data_clean %>% select(-c("geo_school_elem_district","geo_school_hs_district","meta_town_code","basement_combined","climate_control","garage_combined","geographical_risk"))
+
+historic_property_data_clean1 <- historic_property_data_clean %>% select(-c("geo_school_elem_district","geo_school_hs_district","meta_town_code","basement_combined","climate_control","char_gar1_size", "char_gar1_cnst", "char_gar1_att", "char_gar1_area","geo_ohare_noise", "geo_floodplain", "geo_fs_flood_factor", "geo_fs_flood_risk_direction"))
+
+#str(historic_property_data_clean1)
+# Create a correlation matrix
+correlation_matrix <- cor(historic_property_data_clean1)
+
+# Set the threshold for correlation
+threshold <- 0.75
+
+# Find highly correlated variables
+highly_correlated <- which(correlation_matrix > threshold & correlation_matrix < 1.0, arr.ind = TRUE)
+
+# Display the highly correlated pairs
+ for (i in 1:nrow(highly_correlated)) {
+   row_index <- highly_correlated[i, 1]
+   col_index <- highly_correlated[i, 2]
+   variable1 <- colnames(correlation_matrix)[row_index]
+   variable2 <- colnames(correlation_matrix)[col_index]
+   cor_value <- correlation_matrix[row_index, col_index]
+   
+   cat("Correlation between", variable1, "and", variable2, ":", cor_value, "\n")
+ }
+
+# Manually drop one variable from each highly correlated pair based on your decision
+variables_to_drop <- c("char_beds","char_fbath")
+
+# Drop the selected variables
+historic_property_data_clean2 <- historic_property_data_clean1[, !(colnames(historic_property_data_clean1) %in% variables_to_drop)]
+
+# Manually add back categorical variables
+#variables_to_add <- c("geo_school_elem_district","geo_school_hs_district","meta_town_code","basement_combined","climate_control","garage_combined","geographical_risk")
+
+variables_to_add <- c("geo_school_elem_district","geo_school_hs_district","meta_town_code","basement_combined","climate_control","char_gar1_size", "char_gar1_cnst", "char_gar1_att", "char_gar1_area","geo_ohare_noise", "geo_floodplain", "geo_fs_flood_factor", "geo_fs_flood_risk_direction")
+
+# Add the selected variables
+#historic_property_data_clean2 <- cbind(historic_property_data_clean2, historic_property_data_clean[, variables_to_add])
+
+# Add and convert the selected variables
+historic_property_data_clean2 <- cbind(historic_property_data_clean2, lapply(historic_property_data_clean[, variables_to_add], as.character))
+
+str(historic_property_data_clean2)
+# Now, historic_property_data_clean2 contains variables with reduced multicollinearity
+```
+
+```{r}
+# Drop unrelated tibbles
+rm(historic_property_data)
+rm(historic_property_data_clean)
+rm(historic_property_data_clean1)
+rm(predict_property_data)
+
+data = historic_property_data_clean2
+rm(historic_property_data_clean2)
+```
+
+
+```{r}
+# Specify the columns to be converted to factors (all categorical variables that are listed as predictors in the codebook)
+columns_to_convert <- c(
+"char_air", "char_apts", "char_attic_fnsh", "char_attic_type", "char_bsmt", "char_bsmt_fin", "char_ext_wall", "char_gar1_area", "char_gar1_att", "char_gar1_cnst", "char_gar1_size", "char_heat", "char_oheat", "char_porch", "char_roof_cnst", "char_tp_dsgn", "char_tp_plan", "char_type_resd", "char_use", "geo_floodplain", "geo_ohare_noise", "geo_school_elem_district", "geo_school_hs_district", "geo_withinmr100", "geo_withinmr101300", "ind_garage", "ind_large_lot", "meta_nbhd", "meta_town_code", "time_sale_during_holidays", "time_sale_during_school_year", "time_sale_month_of_year", "time_sale_quarter_of_year", "ind_arms_length", "basement_combined", "climate_control", "geo_fs_flood_factor", "geo_fs_flood_risk_direction"
+)
+
+columns_to_convert <- intersect(columns_to_convert, names(data))
+
+# Convert specified columns to factors
+data[columns_to_convert] <- lapply(data[columns_to_convert], as.factor)
+str(data)
+```
+
+
+```{r}
+##Data Partition
+# set seed for reproducing the partition 
+set.seed(1) 
+
+# row numbers of the training set
+train.index <- sample(c(1:dim(data)[1]), dim(data)[1]*0.6)  
+head(train.index)
+
+# training set 
+train.df <- data[train.index, ]
+head(train.df)
+
+# test set 
+test.df <- data[-train.index, ]
+head(test.df)
+```
+```{r}
+# convert a data frame of predictors to a matrix and create dummy variables for character variables 
+x <- model.matrix(sale_price~., data)[,-1]
+
+# outcome 
+y <- data$sale_price
+
+test.index <- setdiff(c(1:dim(x)[1]), train.index)
+y.test <- y[test.index]
+```
+
+
+```{r}
+# fit a lasso regression model 
+fit <- glmnet(x[train.index,], y[train.index], alpha = 1)
+# sequence of lambda values 
+fit$lambda
+# dimension of lasso regression coefficients 
+dim(coef(fit))
+# plot coefficients on log of lambda values 
+plot(fit, xvar = "lambda")
+
+```
+
+```{r}
+# set seed 
+set.seed(1)
+# 5-fold cross validation 
+cv.fit <- cv.glmnet(x[train.index,], y[train.index], alpha = 1, nfolds = 5, type.measure = "mse")
+# plot the cross-validated MSE for each lambda 
+plot(cv.fit)
+# lambda that corresponds to the lowest cross-validated MSE 
+lambda.best <- cv.fit$lambda.min
+lambda.best
+
+```
+
+```{r}
+# lasso regression coefficients  
+coef.lambda.best <- predict(fit, s=lambda.best, type = "coefficients")
+# non-zero coefficients 
+coef.lambda.best[coef.lambda.best!=0]
+# make predictions for records in the test set 
+pred.lambda.best <- predict(fit, s=lambda.best, newx = x[test.index,])
+# MSE in the test set (lowest MSE)
+mean((y.test - pred.lambda.best)^2)
+
+```
+
+
+```{r}
+# List of columns to drop
+columns_to_drop <- c("geo_school_elem_district", "geo_school_hs_district", "geo_other_perc")  # Replace with actual column names
+
+# Drop specified columns
+train.df <- train.df[, !names(train.df) %in% c(columns_to_drop)]
+test.df <- test.df[, !names(train.df) %in% c(columns_to_drop)]
+
+str(train.df)
+```
+
+```{r}
+library(caret)
+findLinearCombos(data.matrix(data))
+
+```
+
+```{r}
+# Extract coefficients for the optimal lambda
+selected_features <- coef(fit, s = lambda.best)
+ 
+# Identify selected variables with non-zero coefficients
+selected_variables <- rownames(selected_features)[selected_features[, 1] != 0]
+ 
+# Sort variables based on the absolute size of their coefficients
+sorted_variables <- selected_variables[order(abs(selected_features[selected_variables, 1]), decreasing = TRUE)]
+ 
+# Display or use the top 10 variables
+print(sorted_variables)
+
+# Top 10 variables excluding geo_school_elem_district are: "meta_town_code", "climate_control", "geo_asian_perc", "geo_black_perc", "char_use2", "basement_combined", "char_type_resd", "geo_withinmr1001", "char_roof_cnst5", "geo_his_perc"
+
+```
+
+
+```{r}
+# All variables that appeared in Lasso regression sorted_variables output
+columns_to_keep_2 <- c(
+"sale_price", "meta_town_code", "climate_control", "geo_asian_perc", "geo_black_perc", "char_use", "basement_combined", "char_type_resd", "geo_withinmr100", "char_roof_cnst", "geo_his_perc", "geo_fs_flood_factor", "char_gar1_cnst", "char_type_resd", "char_gar1_size", "geo_withinmr101300", "char_frpl", "char_ext_wall", "char_gar1_att", "char_gar1_area", "geo_floodplain", "ind_garage", "geo_ohare_noise", "char_attic_type", "econ_tax_rate", "char_type_resd", "geo_fs_flood_risk_direction", "char_age", "char_bldg_sf", "char_rooms", "char_hd_sf", "econ_midincome", "meta_certified_est_land", "meta_certified_est_bldg"
+)
+
+train.df <- train.df[, names(train.df) %in% c(columns_to_keep_2)]
+test.df <- test.df[, names(train.df) %in% c(columns_to_keep_2)]
+str(train.df)
+```
+
+
+```{r}
+library(randomForest)
+
+set.seed(1)
+rf <- randomForest(sale_price ~ ., data = train.df, mtry = 4)
+rf
+```
+
+```{r}
+# variable importance 
+importance(rf)
+
+# variable importance plot
+varImpPlot(rf)
+```
+
+```{r}
+str(test.df)
+str(train.df)
+
+# Predicted values
+rf.pred <- predict(rf, test.df)
+head(rf.pred)
+
+# predicted probabilities 
+# type="prob": generate predicted probabilities 
+predict(rf, test.df, type="response")
+
+# predicted classes 
+# type="class": generate predicted classes
+rf.pred <- predict(rf, test.df, type="class")
+head(rf.pred)
+str(rf.pred)
+```
+
+```{r}
+predictions <- predict(rf, newdata = test.df)
+
+mse <- mean((test.df$sale_price - predictions)^2)
+print(mse)
+
+```
+
+```{r}
+columns_to_keep_2 <- c(
+"pid", "sale_price", "meta_town_code", "climate_control", "geo_asian_perc", "geo_black_perc", "char_use", "basement_combined", "char_type_resd", "geo_withinmr100", "char_roof_cnst", "geo_his_perc", "geo_fs_flood_factor", "char_gar1_cnst", "char_type_resd", "char_gar1_size", "geo_withinmr101300", "char_frpl", "char_ext_wall", "char_gar1_att", "char_gar1_area", "geo_floodplain", "ind_garage", "geo_ohare_noise", "char_attic_type", "econ_tax_rate", "char_type_resd", "geo_fs_flood_risk_direction", "char_age", "char_bldg_sf", "char_rooms", "char_hd_sf", "econ_midincome", "meta_certified_est_land", "meta_certified_est_bldg"
+)
+
+predict_property_data_clean <- predict_property_data_clean[, names(predict_property_data_clean) %in% c(columns_to_keep_2)]
+str(predict_property_data_clean)
+```
+
+```{r}
+# Specify the columns to be converted to factors (all categorical variables that are listed as predictors in the codebook)
+columns_to_convert <- c(
+"char_air", "char_apts", "char_attic_fnsh", "char_attic_type", "char_bsmt", "char_bsmt_fin", "char_ext_wall", "char_gar1_area", "char_gar1_att", "char_gar1_cnst", "char_gar1_size", "char_heat", "char_oheat", "char_porch", "char_roof_cnst", "char_tp_dsgn", "char_tp_plan", "char_type_resd", "char_use", "geo_floodplain", "geo_ohare_noise", "geo_school_elem_district", "geo_school_hs_district", "geo_withinmr100", "geo_withinmr101300", "ind_garage", "ind_large_lot", "meta_nbhd", "meta_town_code", "time_sale_during_holidays", "time_sale_during_school_year", "time_sale_month_of_year", "time_sale_quarter_of_year", "ind_arms_length", "basement_combined", "climate_control", "geo_fs_flood_factor", "geo_fs_flood_risk_direction"
+)
+
+columns_to_convert <- intersect(columns_to_convert, names(predict_property_data_clean))
+
+# Convert specified columns to factors
+predict_property_data_clean[columns_to_convert] <- lapply(predict_property_data_clean[columns_to_convert], as.factor)
+str(predict_property_data_clean)
+```
+
+
+```{r}
+aligned_predict_data <- predict_property_data_clean[colnames(train.df)[-which(colnames(train.df) == "sale_price")]]
+
+temp_data <- rbind(train.df[1, -which(colnames(train.df) == "sale_price")], aligned_predict_data)
+temp_data <- temp_data[-1, ]
+predicted_sale_prices <- predict(rf, new_data = temp_data)
+
+```
+
+```{r}
+# Create a data frame with "pid" and predicted assessed values
+output <- data.frame(pid = predict_property_data_clean$pid, assessed_value = predicted_sale_prices)
+
+# Write the data frame to a CSV file
+write.csv(output, "assessed_value.csv", row.names = FALSE)
+
+```
+
